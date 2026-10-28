@@ -1,0 +1,43 @@
+{
+  "name": "dsh-hormone",
+  "version": "0.1.0",
+  "description": "Hormone state for DSH agents: a few continuously changing, time-decaying values driven by real session events, written into the system prompt only when they go out of range.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "hormone",
+    "mood",
+    "system-prompt"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node tests/test.mjs",
+    "test:smoke": "node tests/smoke.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/y258dd/dsh-hormone.git"
+  },
+  "bugs": {
+    "url": "https://github.com/y258dd/dsh-hormone/issues"
+  },
+  "homepage": "https://github.com/y258dd/dsh-hormone#readme",
+  "author": "y258dd",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

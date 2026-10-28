@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+.env
+# 运行时状态不属于仓库
+state.json
+events.jsonl
+hormone/

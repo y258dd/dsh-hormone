@@ -1,0 +1,11 @@
+# dsh-hormone — DSH bundle patch
+#
+# 装法（装完重启 DSH）：
+#   dsh plugin --profile desktop add link:D:/DSH/dsh-hormone
+#
+# 数据落在 %DSH_HOME%\hormone\state.json，纯文本，随时能打开看、能删。
+# 想只记不注入：设环境变量 DSH_HORMONE_MODE=observe 再启动。
+# 想抓一轮真实事件结构：设 DSH_HORMONE_DEBUG=1，事件会追加到 %DSH_HOME%\hormone\events.jsonl。
+- insert:
+    - id: dsh-hormone
+      name: dsh-hormone
