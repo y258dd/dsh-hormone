@@ -37,6 +37,12 @@
 ## 装
 
 ```bash
+dsh plugin --profile desktop add github:y258dd/dsh-hormone
+```
+
+改代码想热重载时，克隆下来用 link 装：
+
+```bash
 git clone https://github.com/y258dd/dsh-hormone.git
 cd dsh-hormone
 dsh plugin --profile desktop add link:$PWD   # Windows: link:D:/path/to/dsh-hormone
