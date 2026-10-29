@@ -37,6 +37,12 @@
 ## 装
 
 ```bash
+dsh plugin --profile desktop add dsh-hormone
+```
+
+不想走 npm 的话，直接从 GitHub 装也行：
+
+```bash
 dsh plugin --profile desktop add github:y258dd/dsh-hormone
 ```
 
