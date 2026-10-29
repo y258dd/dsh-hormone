@@ -113,27 +113,39 @@ test('project：跨天 energy 回升', () => {
   eq(localDay(at(2026, 10, 29, 12)) !== localDay(day1), true)
 })
 
-test('project：空闲超过 12h 才回升，且不直接回满', () => {
+test('project：空闲超过 1h 才回升，且不直接回满', () => {
   const start = at(2026, 10, 28, 12)
   const state = freshState(start)
   state.values.energy = 0.1
-  const noIdle = project(state, start + 11 * 3600)
-  near(noIdle.energy, 0.1, 1e-9, '不到 12h 不该回升：')
-  const idle = project(state, start + 14 * 3600)
-  ok(idle.energy > 0.1, `空闲 14h 应回升，实际 ${idle.energy}`)
+  const noIdle = project(state, start + 30 * 60)
+  near(noIdle.energy, 0.1, 1e-9, '不到 1h 不该回升：')
+  const idle = project(state, start + 3 * 3600)
+  ok(idle.energy > 0.1, `空闲 3h 应回升，实际 ${idle.energy}`)
   ok(idle.energy < ENERGY.dayBaseline, `不该一次回满，实际 ${idle.energy}`)
 })
 
-test('project：深夜空闲回得比白天慢（基线不同）', () => {
-  const nightStart = at(2026, 10, 28, 3)
+test('project：闲聊不推迟恢复（计时只看 lastWorkAt）', () => {
+  const start = at(2026, 10, 28, 12)
+  const state = freshState(start)
+  state.values.energy = 0.1
+  // 每 20 分钟来一条闲聊，updatedAt 一直刷新，但没干活
+  state.updatedAt = start + 20 * 60
+  state.lastWorkAt = start
+  const after = project(state, start + 90 * 60)
+  ok(after.energy > 0.1, `没干活就该开始回升，实际 ${after.energy}`)
+})
+
+test('project：同样空闲 3 小时，深夜基线低于白天', () => {
+  // 起点和空闲时长都一样，只有投影时刻落在深夜还是白天不同。
+  const nightStart = at(2026, 10, 28, 1)
   const night = freshState(nightStart)
   night.values.energy = 0.1
-  const nightEnergy = project(night, nightStart + 14 * 3600).energy
+  const nightEnergy = project(night, nightStart + 3 * 3600).energy
 
   const dayStart = at(2026, 10, 28, 12)
   const day = freshState(dayStart)
   day.values.energy = 0.1
-  const dayEnergy = project(day, dayStart + 14 * 3600).energy
+  const dayEnergy = project(day, dayStart + 3 * 3600).energy
 
   ok(nightEnergy < dayEnergy, `深夜应低于白天：${nightEnergy} vs ${dayEnergy}`)
 })
@@ -266,7 +278,8 @@ test('applyEvent：turn 变化时结算上一轮——没出错就有奖励', ()
   const beforeDopamine = state.values.dopamine
   const beforeCortisol = state.values.cortisol
 
-  // 第一轮跑了两条消息
+  // 第一轮干过活（有工具调用），跑了两条消息
+  applyEvent(state, { type: 'tool/result', data: { message: { isError: false } } }, now)
   applyEvent(state, { type: 'assistant/message', data: { turn: 1, usage: { outputTokens: 500 } } }, now)
   applyEvent(state, { type: 'assistant/message', data: { turn: 1, usage: { outputTokens: 500 } } }, now)
   eq(state.session.tokensInTurn, 1000)
@@ -293,9 +306,26 @@ test('applyEvent：这一轮出过错就不给奖励', () => {
   near(state.values.dopamine, beforeDopamine, 1e-9, '出错的一轮不该加爽度：')
 })
 
+test('settleTurn：没调工具的闲聊轮不扣精力、不给收尾奖励', () => {
+  const now = at(2026, 10, 28, 12)
+  const state = freshState(now)
+  const before = { ...state.values }
+  state.lastWorkAt = now - 7200
+  applyEvent(state, { type: 'assistant/message', data: { turn: 1, usage: { outputTokens: 50000 } } }, now)
+  const changed = applyEvent(state, { type: 'assistant/message', data: { turn: 2, usage: { outputTokens: 0 } } }, now)
+
+  eq(changed, null, '闲聊轮不该产生状态变化：')
+  near(state.values.energy, before.energy, 1e-9, '闲聊不该扣精力：')
+  near(state.values.dopamine, before.dopamine, 1e-9, '闲聊不该加爽度：')
+  near(state.values.cortisol, before.cortisol, 1e-9, '闲聊不该泄压力：')
+  eq(state.lastWorkAt, now - 7200, '闲聊不该刷新干活时间：')
+  eq(state.session.toolsInTurn, 0, '闲聊轮结束后工具计数应清零：')
+})
+
 test('settleTurn：重复调用不会二次结算', () => {
   const now = at(2026, 10, 28, 12)
   const state = freshState(now)
+  applyEvent(state, { type: 'tool/result', data: { message: { isError: false } } }, now)
   applyEvent(state, { type: 'assistant/message', data: { turn: 1, usage: { outputTokens: 1000 } } }, now)
   const first = settleTurn(state, state.session, now)
   ok(first)
