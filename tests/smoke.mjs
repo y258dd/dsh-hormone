@@ -53,12 +53,12 @@ try {
   assert.equal(prompt(), '', '初始状态不该注入')
 
   // 一堆工具报错把压力顶上去。
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 6; i += 1) {
     emit({ type: 'tool/result', data: { message: { isError: true } } })
   }
   const text = prompt()
   assert.ok(text.startsWith('[hormone]'), `压力拉满后应该注入，实际 ${JSON.stringify(text)}`)
-  assert.ok(text.length <= 80, `注入超长：${text.length}`)
+  assert.ok(text.length <= 110, `注入超长：${text.length}`)
 
   // 用户夸一句，爽度上去。
   emit({

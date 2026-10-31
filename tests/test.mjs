@@ -11,9 +11,12 @@ import { applyEvent, detectUserTone, settleTurn, textOfContent, tokensOf } from 
 import { MAX_CHARS, render, THRESHOLD } from '../lib/render.js'
 import {
   applyDeltas,
+  BOREDOM,
   clamp01,
+  COUPLING,
   decayValue,
   ENERGY,
+  energyCostScale,
   freshState,
   HALF_LIFE,
   loadState,
@@ -87,11 +90,26 @@ test('project 是纯函数：不改 state', () => {
   eq(JSON.stringify(state), snapshot)
 })
 
-test('project：cortisol 按 4 小时半衰期衰减', () => {
+test('project：cortisol 按半衰期衰减（爽度为 0 时不加速）', () => {
   const start = at(2026, 10, 28, 12)
   const state = freshState(start)
   state.values.cortisol = 0.8
+  state.values.dopamine = 0
   near(project(state, start + HALF_LIFE.cortisol).cortisol, 0.4, 1e-6)
+})
+
+test('project：开心让压力散得更快（耦合 joyDecay）', () => {
+  const start = at(2026, 10, 28, 12)
+  const blue = freshState(start)
+  blue.values.cortisol = 0.8
+  blue.values.dopamine = 0
+  const happy = freshState(start)
+  happy.values.cortisol = 0.8
+  happy.values.dopamine = 1
+  const dt = 60 * 60
+  const blueAfter = project(blue, start + dt).cortisol
+  const happyAfter = project(happy, start + dt).cortisol
+  ok(happyAfter < blueAfter, `开心时压力该掉得更快：${happyAfter} vs ${blueAfter}`)
 })
 
 test('project：dopamine 衰减比 cortisol 快得多', () => {
@@ -101,7 +119,7 @@ test('project：dopamine 衰减比 cortisol 快得多', () => {
   state.values.dopamine = 0.8
   const after = project(state, start + HALF_LIFE.dopamine)
   near(after.dopamine, 0.4, 1e-6)
-  ok(after.cortisol > 0.7, `cortisol 半衰期长，40 分钟后不该掉这么多，实际 ${after.cortisol}`)
+  ok(after.cortisol > 0.6, `40 分钟后 cortisol 不该掉到一半以下，实际 ${after.cortisol}`)
 })
 
 test('project：跨天 energy 回升', () => {
@@ -148,6 +166,57 @@ test('project：同样空闲 3 小时，深夜基线低于白天', () => {
   const dayEnergy = project(day, dayStart + 3 * 3600).energy
 
   ok(nightEnergy < dayEnergy, `深夜应低于白天：${nightEnergy} vs ${dayEnergy}`)
+})
+
+test('project：没人说话就慢慢无聊，且不会超过 1', () => {
+  const start = at(2026, 10, 28, 12)
+  const state = freshState(start)
+  eq(project(state, start + 10 * 60).boredom, BOREDOM.start, '宽限期内不涨：')
+  const quiet = project(state, start + 6 * 3600).boredom
+  ok(quiet > BOREDOM.start + 0.2, `6 小时没人说话该闷起来，实际 ${quiet}`)
+  ok(quiet < 1, `不该顶满，实际 ${quiet}`)
+})
+
+test('project：分段投影和一次性投影结果一致（不会重复叠加）', () => {
+  const start = at(2026, 10, 28, 12)
+  const once = freshState(start)
+  once.values.energy = 0.2
+  once.values.boredom = 0.1
+  const expected = project(once, start + 2 * 3600)
+
+  const step = freshState(start)
+  step.values.energy = 0.2
+  step.values.boredom = 0.1
+  // 模拟每半小时落盘一次：投影值写回，updatedAt 前进
+  for (let i = 1; i <= 4; i += 1) {
+    const t = start + i * 1800
+    const p = project(step, t)
+    step.values.energy = p.energy
+    step.values.boredom = p.boredom
+    step.updatedAt = t
+  }
+  near(step.values.energy, expected.energy, 1e-9, 'energy：')
+  near(step.values.boredom, expected.boredom, 1e-9, 'boredom：')
+})
+
+test('applyDeltas：同样一活儿，压力大时更累、爽度高时没那么累', () => {
+  const now = at(2026, 10, 28, 12)
+  const cost = 0.1
+  const happy = freshState(now)
+  happy.values.cortisol = 0
+  happy.values.dopamine = 0.9
+  applyDeltas(happy, { energy: -cost }, now)
+
+  const stressed = freshState(now)
+  stressed.values.cortisol = 0.9
+  stressed.values.dopamine = 0
+  applyDeltas(stressed, { energy: -cost }, now)
+
+  ok(happy.values.energy > stressed.values.energy, `开心时该掉得少：${happy.values.energy} vs ${stressed.values.energy}`)
+  ok(
+    energyCostScale({ cortisol: 0.9, dopamine: 0 }) > energyCostScale({ cortisol: 0, dopamine: 0.9 }),
+    '压力让消耗变大、爽度让消耗变小',
+  )
 })
 
 test('applyDeltas：上下界不会溢出', () => {
@@ -241,7 +310,7 @@ test('applyEvent：被批评 cortisol 上涨', () => {
   const state = freshState(now)
   const before = state.values.cortisol
   ok(applyEvent(state, { type: 'user/message', data: { content: '又错了', source: { kind: 'user' } } }, now))
-  near(state.values.cortisol, clamp01(before + 0.25), 1e-9)
+  near(state.values.cortisol, clamp01(before + 0.12), 1e-9)
 })
 
 test('applyEvent：工具报错 cortisol 上涨，连续 3 次额外叠一次', () => {
@@ -251,13 +320,25 @@ test('applyEvent：工具报错 cortisol 上涨，连续 3 次额外叠一次', 
   const fail = { type: 'tool/result', data: { message: { isError: true } } }
 
   applyEvent(state, fail, now)
-  near(state.values.cortisol, clamp01(base + 0.15), 1e-9, '第一次报错：')
+  near(state.values.cortisol, clamp01(base + 0.08), 1e-9, '第一次报错：')
 
   applyEvent(state, fail, now)
-  near(state.values.cortisol, clamp01(base + 0.3), 1e-9, '第二次报错：')
+  near(state.values.cortisol, clamp01(base + 0.16), 1e-9, '第二次报错：')
 
   applyEvent(state, fail, now)
-  near(state.values.cortisol, clamp01(base + 0.15 * 3 + 0.3), 1e-9, '第三次报错要额外叠 0.30：')
+  near(state.values.cortisol, clamp01(base + 0.08 * 3 + 0.15), 1e-9, '第三次报错要额外叠 0.15：')
+})
+
+test('applyEvent：真人说话缓解无聊，并重置无聊计时', () => {
+  const now = at(2026, 10, 28, 12)
+  const start = now - 8 * 3600
+  const state = freshState(start)
+  state.lastUserAt = start
+  const before = project(state, now).boredom
+  ok(before > 0.3, `8 小时没人说话应该先闷起来，实际 ${before}`)
+  applyEvent(state, { type: 'user/message', data: { content: '在吗', source: { kind: 'user' } } }, now)
+  ok(state.values.boredom < before, `说话该缓解无聊：${state.values.boredom} vs ${before}`)
+  eq(state.lastUserAt, now, '无聊计时该重置：')
 })
 
 test('applyEvent：成功的工具调用会清空连续错误计数', () => {
@@ -288,7 +369,14 @@ test('applyEvent：turn 变化时结算上一轮——没出错就有奖励', ()
   // 第二轮开始 → 结算第一轮
   const changed = applyEvent(state, { type: 'assistant/message', data: { turn: 2, usage: { outputTokens: 0 } } }, now)
   ok(changed, '轮次切换应该产生变化')
-  near(state.values.energy, clamp01(beforeEnergy - 1000 / ENERGY.dailyBudget), 1e-9, '精力扣减：')
+  // 扣精力要乘情绪系数：这一轮开始时 cortisol 0.2、dopamine 0.1
+  const scale = energyCostScale({ cortisol: beforeCortisol, dopamine: beforeDopamine })
+  near(
+    state.values.energy,
+    clamp01(beforeEnergy - (1000 / ENERGY.dailyBudget) * scale),
+    1e-9,
+    '精力扣减：',
+  )
   near(state.values.dopamine, clamp01(beforeDopamine + 0.35), 1e-9, '成功收尾加爽度：')
   near(state.values.cortisol, clamp01(beforeCortisol - 0.2), 1e-9, '成功收尾泄压力：')
   eq(state.session.tokensInTurn, 0, '新轮次 token 计数应清零：')
@@ -359,9 +447,10 @@ test('render：越界才出文本，且带前缀', () => {
   ok(text.includes('0.85'), `缺数值：${text}`)
 })
 
-test('render：三条全越界也不超过 80 字', () => {
-  const text = render({ cortisol: 1, energy: 0, dopamine: 1 })
+test('render：四条全越界也不超过 MAX_CHARS', () => {
+  const text = render({ cortisol: 1, energy: 0, dopamine: 1, boredom: 1 })
   ok(text.length <= MAX_CHARS, `超长 ${text.length} > ${MAX_CHARS}：${text}`)
+  ok(text.includes('无聊'), `该带上无聊：${text}`)
   ok(text.length > 0)
 })
 
