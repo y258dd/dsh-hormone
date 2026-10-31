@@ -1,6 +1,6 @@
 {
   "name": "dsh-hormone",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Hormone state for DSH agents: a few continuously changing, time-decaying values driven by real session events, written into the system prompt only when they go out of range.",
   "keywords": [
     "dsh",

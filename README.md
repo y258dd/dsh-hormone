@@ -4,7 +4,7 @@
 
 不是给模型贴情绪标签，是给它一组真的会变的内部状态。
 
-> 状态：`0.3.0`，注入层已跑通，门控层未做。只用 DSH 的公开插件 API，不修改任何其他插件的数据，不联网。
+> 状态：`0.4.0`，注入层已跑通，门控层未做。只用 DSH 的公开插件 API，不修改任何其他插件的数据，不联网。
 
 ## 它是什么
 
@@ -25,12 +25,18 @@
 
 | 谁影响谁 | 效果 | 参数 |
 |---|---|---|
-| 爽度 → 精力扣减 | 越开心，同样一活儿越不累（最多省一半） | `COUPLING.joyCost = 0.5` |
-| 压力 → 精力扣减 | 越烦，同样一活儿越累（最多翻 1.8 倍） | `COUPLING.stressCost = 0.8` |
+| 爽度 → 精力扣减 | 越开心，同样一活儿越不累（最多省一半；按 √ 算，中等开心就省三成） | `COUPLING.joyCost = 0.5` |
+| 压力 → 精力扣减 | 越烦，同样一活儿越累（最多 +40%） | `COUPLING.stressCost = 0.4` |
 | 爽度 → 压力消散 | 开心时压力半衰期最短缩到 65% | `COUPLING.joyDecay = 0.35` |
 | 压力 → 精力恢复 | 烦的时候回血最慢拖到 2.5 倍 | `COUPLING.stressRecover = 1.5` |
 
 也就是说：一直不顺 → 压力高 → 干同样的活掉得更多 → 更难缓过来，是个正反馈；反过来被夸几句 → 掉得少、压力散得快，也是正反馈。两头都有上限，不会失控。
+
+## 熬夜的账第二天还
+
+00:00–07:00 还在干活，每扣掉 1 点精力就记 1.3 倍睡眠债（`DEBT.ratio`），债把精力上限压低：欠满时上限只有 0.6（`DEBT.max = 0.4`），白天怎么摸鱼也回不到满。
+
+债从记债时刻起 24 小时线性衰减——睡一觉就还清，连续熬夜会累加但封顶。这是让「熬一次夜，第二天确实虚」真的成立，而不是只靠深夜基线那 0.45。
 
 ## 它怎么起作用
 
@@ -44,6 +50,8 @@
 - `boredom > 0.55` → 有点闷，可以主动扯两句
 
 注入文本硬上限 110 字，带 `[hormone]` 前缀，每轮最多一条。
+
+而且是**边沿触发**：越界的第一轮说一次，之后一直越界就闭嘴，直到恢复正常后再次越界；一直不恢复的话，静默 40 分钟才重提一次（`EMIT.rementionAfterSec`）。否则「精力见底」这种长期状态会每轮刷一遍，把这一句话变成噪音。
 
 **没有做门控**（比如硬压输出长度）。门控是分水岭：注入只是「告诉它现在什么状态」，门控是「替它决定能说多少」。第一版先把状态跑准，跑两天曲线不极端了再谈门控。
 
@@ -84,7 +92,7 @@ dsh plugin --profile desktop add link:$PWD   # Windows: link:D:/path/to/dsh-horm
 
 状态文件：`%DSH_HOME%\hormone\state.json`（默认 `~/.dsh/hormone/state.json`，Windows 上是 `C:\Users\<你>\.dsh\hormone\state.json`）
 
-纯 JSON，打开就能看。`history` 里是最近 400 次变化，每条带 `why`（`tool-error` / `errors-3` / `turn-done` / `praised` / `blamed` / `user-chat`），想验收「跑两天曲线有没有起伏」直接看这个。
+纯 JSON，打开就能看。`history` 里是最近 400 次变化，每条带 `why`（`tool-error` / `errors-3` / `turn-done` / `praised` / `blamed` / `user-chat`），有睡眠债时多一个 `debt` 字段，想验收「跑两天曲线有没有起伏」直接看这个。
 
 删掉这个文件 = 回到初始状态，不会有副作用。
 
@@ -99,11 +107,11 @@ dsh plugin --profile desktop add link:$PWD   # Windows: link:D:/path/to/dsh-horm
 
 三个文件顶部，改完重启：
 
-- `lib/state.js` — `HALF_LIFE`（衰减快慢）、`ENERGY`（日预算、跨天恢复、深夜基线、恢复等待）、`BOREDOM`（多久没人说话开始闷、闷得多快）、`COUPLING`（四个情绪互相拉扯的强度）
+- `lib/state.js` — `HALF_LIFE`（衰减快慢）、`ENERGY`（日预算、跨天恢复、深夜基线、恢复等待）、`BOREDOM`（多久没人说话开始闷、闷得多快）、`COUPLING`（四个情绪互相拉扯的强度）、`DEBT`（熬夜记多少债、上限、多久还清）
 - `lib/events.js` — `DELTA`（各种事件的增量）、`BLAME_RE` / `PRAISE_RE`（关键词）
-- `lib/render.js` — `THRESHOLD`（注入阈值）、`MAX_CHARS`
+- `lib/render.js` — `THRESHOLD`（注入阈值）、`MAX_CHARS`、`EMIT`（一直越界时隔多久重提）
 
-`ENERGY.dailyBudget` 默认 2500 万，按重度使用日的 token 量估的：966 万 token 掉约 0.39，中等重活 400 万掉约 0.16。觉得掉太快就调大。`COUPLING` 全部设 0 就等于退回「四个数各算各的」。
+`ENERGY.dailyBudget` 默认 1300 万，按 12 天真实用量定的：日均 299 万 token 掉约 0.23，中位日 226 万掉 0.17，峰值日 967 万掉 0.74——一天干活见底，但不会半路清零。觉得掉太快就调大。`COUPLING` 全部设 0 就等于退回「四个数各算各的」。
 
 ## 设计上的几个取舍
 
@@ -126,7 +134,7 @@ dsh plugin --profile desktop add link:$PWD   # Windows: link:D:/path/to/dsh-horm
 ## 测试
 
 ```bash
-npm test              # 40 个用例：衰减、跨天恢复、深夜基线、情绪耦合、无聊涨落、事件映射、轮次结算、阈值渲染、落盘往返
+npm test              # 52 个用例：衰减、跨天恢复、深夜基线、情绪耦合、睡眠债、无聊涨落、事件映射、轮次结算、阈值渲染、边沿触发、落盘往返
 npm run test:smoke    # 假 ctx 接线冒烟
 ```
 

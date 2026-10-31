@@ -4,17 +4,19 @@
  * 只测纯逻辑（衰减、事件映射、渲染），不测 IO —— 落盘和注入要靠真机跑一轮验证。
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyEvent, detectUserTone, settleTurn, textOfContent, tokensOf } from '../lib/events.js'
-import { MAX_CHARS, render, THRESHOLD } from '../lib/render.js'
+import { EMIT, MAX_CHARS, overages, render, renderEdge, THRESHOLD } from '../lib/render.js'
 import {
   applyDeltas,
   BOREDOM,
   clamp01,
   COUPLING,
+  DEBT,
   decayValue,
+  effectiveDebt,
   ENERGY,
   energyCostScale,
   freshState,
@@ -250,6 +252,58 @@ test('applyDeltas：history 上限 400 条', () => {
   ok(state.history.length <= 400, `history 应该被裁剪，实际 ${state.history.length}`)
 })
 
+// ── 情绪耦合与睡眠债 ──────────────────────────────────────────────────
+test('energyCostScale：心情好时省得更快（爽度项开方）', () => {
+  // 线性的话 d=0.25 是 1 - 0.5*0.25 = 0.875；开方后是 1 - 0.5*0.5 = 0.75
+  near(energyCostScale({ cortisol: 0, dopamine: 0.25 }), 0.75, 1e-9)
+  near(energyCostScale({ cortisol: 0, dopamine: 1 }), 0.5, 1e-9)
+  near(energyCostScale({ cortisol: 0, dopamine: 0 }), 1, 1e-9)
+  near(energyCostScale({ cortisol: 0, dopamine: 1 }), 1 - COUPLING.joyCost, 1e-9, '满值还是省 joyCost：')
+})
+
+test('effectiveDebt：24 小时线性衰减到 0，且有上限', () => {
+  const t = at(2026, 10, 28, 0)
+  const st = { debt: { amount: 0.4, at: t } }
+  near(effectiveDebt(st, t), 0.4, 1e-9)
+  near(effectiveDebt(st, t + 12 * 3600), 0.2, 1e-9)
+  near(effectiveDebt(st, t + 24 * 3600), 0, 1e-9)
+  eq(effectiveDebt(st, t + 48 * 3600), 0)
+  near(effectiveDebt({ debt: { amount: 9, at: t } }, t), DEBT.max, 1e-9)
+  eq(effectiveDebt(freshState(t), t), 0, '没记债就是 0：')
+})
+
+test('applyDeltas：深夜干活记睡眠债，立刻压低上限', () => {
+  const night = at(2026, 10, 28, 2)
+  const state = freshState(night)
+  state.values.energy = 1
+  applyDeltas(state, { energy: -0.2 }, night)
+  ok(effectiveDebt(state, night) > 0.2, `深夜扣精力该记债，实际 ${effectiveDebt(state, night)}`)
+  ok(state.values.energy < 0.8, `上限被压低，实际 ${state.values.energy}`)
+
+  const day = at(2026, 10, 28, 14)
+  const dayState = freshState(day)
+  dayState.values.energy = 1
+  applyDeltas(dayState, { energy: -0.2 }, day)
+  eq(dayState.debt.amount, 0, '白天不该记债：')
+})
+
+test('project：睡眠债压低精力上限，回也回不到满', () => {
+  const now = at(2026, 10, 28, 14)
+  const state = freshState(now)
+  state.values.energy = 1
+  state.debt = { amount: 0.4, at: now }
+  const p = project(state, now + 60)
+  ok(p.energy <= 1 - 0.4 + 1e-3, `上限约 0.6（债在缓慢衰减），实际 ${p.energy}`)
+})
+
+test('applyDeltas：深夜记债后 history 带 debt 字段', () => {
+  const night = at(2026, 10, 28, 3)
+  const state = freshState(night)
+  applyDeltas(state, { energy: -0.3 }, night, 'late')
+  eq(state.history.length, 1)
+  ok(state.history[0].debt > 0, `history 该记下债务：${JSON.stringify(state.history[0])}`)
+})
+
 // ── 事件映射 ───────────────────────────────────────────────────────────
 console.log('events.js')
 
@@ -459,6 +513,60 @@ test('render：空输入不炸', () => {
   eq(render(undefined), '')
 })
 
+test('overages：按固定顺序给出越界项', () => {
+  eq(
+    overages({ cortisol: 0.9, energy: 0.1, dopamine: 0.9, boredom: 0.9 }).join(),
+    'cortisol,energy,dopamine,boredom',
+  )
+  eq(overages({ cortisol: 0.1, energy: 0.9, dopamine: 0.1, boredom: 0 }).length, 0)
+})
+
+test('renderEdge：新越界说一次，持续越界不再刷屏', () => {
+  const now = at(2026, 10, 28, 12)
+  const state = freshState(now)
+  const tired = { cortisol: 0.3, energy: 0.1, dopamine: 0.2, boredom: 0 }
+  const first = renderEdge(state, tired, now)
+  ok(first.includes('精力'), `第一次该说：${first}`)
+  eq(state.emit.active.join(), 'energy')
+  eq(renderEdge(state, tired, now + 60), '', '还越界但没新情况，闭嘴：')
+})
+
+test('renderEdge：恢复正常后再越界，会重新说', () => {
+  const now = at(2026, 10, 28, 12)
+  const state = freshState(now)
+  const tired = { cortisol: 0.3, energy: 0.1, dopamine: 0.2, boredom: 0 }
+  renderEdge(state, tired, now)
+  renderEdge(state, { cortisol: 0.3, energy: 0.8, dopamine: 0.2, boredom: 0 }, now + 60)
+  eq(state.emit.active.length, 0)
+  const again = renderEdge(state, tired, now + 120)
+  ok(again.includes('精力'), `重新越界该再说：${again}`)
+})
+
+test('renderEdge：一直越界，静默够久才重提一次', () => {
+  const now = at(2026, 10, 28, 12)
+  const state = freshState(now)
+  const tired = { cortisol: 0.3, energy: 0.1, dopamine: 0.2, boredom: 0 }
+  renderEdge(state, tired, now)
+  eq(renderEdge(state, tired, now + EMIT.rementionAfterSec - 60), '', '没到时间不该重提：')
+  const again = renderEdge(state, tired, now + EMIT.rementionAfterSec + 60)
+  ok(again.includes('精力'), `静默够久该重提：${again}`)
+  eq(renderEdge(state, tired, now + EMIT.rementionAfterSec + 120), '', '重提后又要闭嘴：')
+})
+
+test('renderEdge：全部正常时不说话，也不留残留', () => {
+  const state = freshState(at(2026, 10, 28, 12))
+  eq(renderEdge(state, { cortisol: 0.1, energy: 0.9, dopamine: 0.1, boredom: 0 }, 0), '')
+  eq(state.emit.active.length, 0)
+})
+
+test('renderEdge：同时新越界两项，一次都说出来', () => {
+  const now = at(2026, 10, 28, 12)
+  const state = freshState(now)
+  const text = renderEdge(state, { cortisol: 0.9, energy: 0.1, dopamine: 0.2, boredom: 0 }, now)
+  ok(text.includes('皮质醇') && text.includes('精力'), `两条都该说：${text}`)
+  eq(state.emit.active.join(), 'cortisol,energy')
+})
+
 // ── 落盘 ───────────────────────────────────────────────────────────────
 console.log('持久化')
 
@@ -484,6 +592,31 @@ test('saveState / loadState 往返一致，坏文件回退默认', () => {
     near(loaded.values.dopamine, state.values.dopamine, 1e-9)
     eq(loaded.session.consecutiveErrors, 2)
     eq(loaded.history.length, state.history.length)
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('loadState：老状态缺 emit / debt 时兜底，不把「没说过」当成「说过了」', () => {
+  const previousHome = process.env.DSH_HOME
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-hormone-legacy-'))
+  process.env.DSH_HOME = dir
+  try {
+    mkdirSync(join(dir, 'hormone'), { recursive: true })
+    const now = at(2026, 10, 28, 12)
+    writeFileSync(
+      join(dir, 'hormone', 'state.json'),
+      JSON.stringify({ version: 1, updatedAt: now, values: { cortisol: 0.2, energy: 0.5, dopamine: 0.1 } }),
+      'utf8',
+    )
+    const loaded = loadState()
+    eq(loaded.debt.amount, 0, '老状态没有睡眠债：')
+    eq(loaded.emit.active.length, 0, '老状态没有 emit：')
+    eq(loaded.emit.at, 0)
+    eq(loaded.values.boredom, BOREDOM.start, '老状态补上无聊初值：')
+    eq(loaded.lastUserAt, now, '老状态用 updatedAt 兜底：')
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
